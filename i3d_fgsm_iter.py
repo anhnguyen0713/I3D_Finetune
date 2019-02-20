@@ -17,19 +17,20 @@ from lib.load_data import load_info
 from lib.feed_queue import FeedQueue
 from lib.label_trans import *
 
+
 _FRAME_SIZE = 224
-_QUEUE_SIZE = 20
-_QUEUE_PROCESS_NUM = 4
+_QUEUE_SIZE = 2
+_QUEUE_PROCESS_NUM = 1
 _MIX_WEIGHT_OF_RGB = 0.5
 _MIX_WEIGHT_OF_FLOW = 0.5
 _LOG_ROOT = 'output'
 _EPS = 1
-_RATE = 1
+_RATE = 3
 
 # NOTE: Before running, change the path of data
 _DATA_ROOT = {
     'ucf101': {
-        'rgb': '/home/anhnguyen/action_recog/UCF-101/frames',
+        'rgb': '/home/anhnguyen/action_recog/UCF-101/frames/frames',
         'flow': ''
     },
     'hmdb51': {
@@ -41,7 +42,7 @@ _DATA_ROOT = {
 # NOTE: Before running, change the path of checkpoints
 _CHECKPOINT_PATHS = {
     'rgb': 'model/ucf101_rgb_0.946_model-44520',
-    'flow': '/model/ucf101_flow_0.946_model-9540',
+    'flow': 'model/ucf101_flow_0.946_model-9540',
 
 _CHANNEL = {
     'rgb': 3,
@@ -67,7 +68,7 @@ def display_info():
 
 def main(dataset, mode, split):
     assert mode in ['rgb', 'flow', 'mixed']
-    log_dir = os.path.join(_LOG_ROOT, 'test-%s-%s-%d-fgsm-%d-rate-%d' % (dataset, mode, split, _EPS, _RATE))
+    log_dir = os.path.join(_LOG_ROOT, 'test-%s-%s-%d-fgsm-iter-%d-rate-%d' % (dataset, mode, split, _EPS, _RATE))
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
 
@@ -146,13 +147,13 @@ def main(dataset, mode, split):
         softmax = tf.nn.softmax(fc_out)
     top_k_op = tf.nn.in_top_k(softmax, label_holder, 1)
 
-    # Get loss
+    # Define loss
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_holder, logits=rgb_fc_out)
 
-    # Compute gradient w.r.t input
+    # Calculate gradient w.r.t input
     grad = tf.gradients(loss, rgb_holder)
 
-    # Get sing of gradient
+    # Get sign of gradient
     grad_sign = tf.sign(grad)
     
     # GPU config
@@ -198,7 +199,6 @@ def main(dataset, mode, split):
         if mode in ['rgb', 'mixed']:
             rgb_clip, label = rgb_queue.feed_me()
             rgb_clip = rgb_clip/255
-            #input_rgb = rgb_clip[np.newaxis, :, :, :, :]
             input_rgb = rgb_clip[np.newaxis, :, :, :, :]
             video_name = rgb_data.videos[i].name
         if mode in ['flow', 'mixed']:
@@ -208,61 +208,47 @@ def main(dataset, mode, split):
             video_name = flow_data.videos[i].name
         
         input_label = np.array([label]).reshape(-1)
-#        print('input_rgb.shape:', input_rgb.shape)
-#        print('input_flow.shape:', input_flow.shape)
-#        print('input_label.shape:', input_label.shape)
 
-        # Extract features from rgb and flow
-        if mode in ['rgb']:
-            cur_loss, cur_grad_sign, top_1, predictions, curr_rgb_fc_data = sess.run(
-                [loss, grad_sign, top_k_op, fc_out, rgb_fc_out],
-                feed_dict={rgb_holder: input_rgb,
-                           label_holder: input_label})
-        if mode in ['flow']:
-            top_1, predictions, curr_flow_fc_data = sess.run(
-                [top_k_op, fc_out, flow_fc_out],
-                feed_dict={flow_holder: input_flow,
-                           label_holder: input_label})
-        if mode in ['mixed']:
-            top_1, predictions, curr_rgb_fc_data, curr_flow_fc_data = sess.run(
-                [top_k_op, fc_out, rgb_fc_out, flow_fc_out],
-                feed_dict={rgb_holder: input_rgb, flow_holder: input_flow,
-                           label_holder: input_label})
-        if mode in ['rgb', 'mixed']:
-            rgb_fc_data[i, :] = curr_rgb_fc_data
-        if mode in ['flow', 'mixed']:
-            flow_fc_data[i, :] = curr_flow_fc_data
-        label_data[i, :] = label
+        # Iter FGSM
+        # Craft AE
+        clip_min = input_rgb - _EPS/255.0
+        clip_max = input_rgb + _EPS/255.0
 
-        # FGSM
-        # Craft AEs 
+        num_iter = np.min([_EPS+4, 1.25*_EPS])
+        num_iter = int(np.max([np.ceil(num_iter), 1]))
 
-        input_rgb_adv = (input_rgb*255.0 + _EPS*cur_grad_sign)/255.0
+        input_batch = np.array(input_rgb)
 
-        # Clip pixels outside [0,1]
-        input_rgb_adv[input_rgb_adv>1]=1.
-        input_rgb_adv[input_rgb_adv<0]=0.
-        input_rgb_adv = input_rgb_adv.reshape(input_rgb.shape)
+        for itr in range(num_iter):
 
-        # Attack at different rates
-        input_rgb_adv_rate = np.array(input_rgb)
-        for ix in range(input_rgb_adv_rate.shape[1]):
-        	if ix%_RATE==0:
-        		input_rgb_adv_rate[:,ix,:,:,:] = input_rgb_adv[:,ix,:,:,:]
+        	# Forward batch data
+        	cur_loss, cur_grad_sign, top_1, predictions, curr_rgb_fc_data = sess.run(
+        	    [loss, grad_sign, top_k_op, fc_out, rgb_fc_out],
+        	    feed_dict={rgb_holder: input_batch,
+        	               label_holder: input_label})
+
+        	# Step perturbation
+        	step_perturb = (cur_grad_sign*1.0).reshape(input_batch.shape)
+
+        	# In each step add only small perturb (1px)
+        	for ix in range(input_batch.shape[1]):
+        		if ix%_RATE==0:
+        			input_batch[:,ix,:,:,:] = np.clip(input_batch[:,ix,:,:,:]+step_perturb[:,ix,:,:,:]/255.0, clip_min[:,ix,:,:,:], clip_max[:,ix,:,:,:])
 
         # # Display input crops
-        # input_rgb_adv_rate = input_rgb_adv_rate.squeeze()
+        # input_batch = input_batch.squeeze()
         # for n in range(8,16):
-        #     im = input_rgb_adv_rate[n,:,:,:]
-        #     ax = plt.subplot(1,8,n-7)
-        #     ax.imshow(im)
+        # 	im = input_batch[n,:,:,:]
+        # 	ax = plt.subplot(1,8,n-7)
+        # 	ax.imshow(im)
         # plt.show()
+        # sys.exit()        
         
         # Predict perturbed input
         if mode in ['rgb']:
             top_1, predictions, curr_rgb_fc_data = sess.run(
                 [top_k_op, fc_out, rgb_fc_out],
-                feed_dict={rgb_holder: input_rgb_adv_rate,
+                feed_dict={rgb_holder: input_batch,
                            label_holder: input_label})
         label_data[i, :] = label
 
