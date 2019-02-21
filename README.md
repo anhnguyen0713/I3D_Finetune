@@ -4,12 +4,12 @@ To setup the original Inception 3D Network, please refer to this repository ([li
 
 Two AE crafting algorithms are implemented to attack TSN. They are Fast Gradient Sign Method and Basic Iterative Fast Gradient Sign Method proposed in this paper ([link](https://arxiv.org/abs/1611.01236)).
 
-To attack by using FGSM algorithm, run the following script
+To perform FGSM attack, run the following script
 ```
 python i3d_fgsm.py
 ```
 
-To attack by using Basic Iter FGSM algorithm, run the following script
+To perform Basic Iterative FGSM attack, run the following script
 ```
 python i3d_fgsm_iter.py
 ```
